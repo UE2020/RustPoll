@@ -1,0 +1,33 @@
+<script>
+    function initFingerprintJS() {
+        // Initialize an agent at application startup.
+        const fpPromise = FingerprintJS.load()
+
+        // Get the visitor identifier when you need it.
+        fpPromise
+            .then(fp => fp.get())
+            .then(result => {
+                // This is the visitor identifier:
+                const visitorId = result.visitorId
+                console.log("visitor id", visitorId)
+            })
+
+        fetch(`/create_poll`, {
+            method: "POST",
+            headers: {
+                "Content-type": "application/json",
+                "accept": "application/json"
+            },
+            body: JSON.stringify({
+                options: [
+                    "Yes",
+                    "No"
+                ],
+                creator: "Developer",
+                note: "Test"
+            })
+        }).then(r => console.log(r));
+    }
+</script>
+<script async src="//cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@3/dist/fp.min.js"
+    onload="initFingerprintJS()"></script>
