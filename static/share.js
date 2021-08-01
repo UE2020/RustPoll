@@ -28,63 +28,36 @@ function sanitize(string) {
 }
 
 function logout() {
-    localStorage.removeItem('name');
-    localStorage.removeItem('password_hash');
+    localStorage.removeItem('token');
 }
 
-async function isLoggedIn() {
-    let username = localStorage.getItem('name');
-    let password = localStorage.getItem('password_hash');
-    if (!username || !password) {
-        return false;
-    }
-    return await fetch(`/api/login`, {
-        method: "POST",
-        headers: {
-            "Content-type": "application/json",
-            "accept": "application/json"
-        },
-        body: JSON.stringify({
-            name: username,
-            password_hash: password
-        })
-    }).then(r => {
-        if (r.status != 200) {
-            logout();
-            return false;
-        } else {
-            return true;
-        }
-    });
-}
 
 function verify() {
     console.log('verifying credentials');
-    let username = localStorage.getItem('name');
-    let password = localStorage.getItem('password_hash');
-    if (!username || !password) {
-        console.log("No username or password");
+    let token = localStorage.getItem('token');
+    if (!token) {
         document.getElementById('logoutContainer').style.display = "none";
         logout();
         return;
     }
-    fetch(`/api/login`, {
-        method: "POST",
+    fetch(`/api/self`, {
+        method: "GET",
         headers: {
             "Content-type": "application/json",
-            "accept": "application/json"
+            "accept": "application/json",
+            "authorization": token
         },
-        body: JSON.stringify({
-            name: username,
-            password_hash: password
-        })
     }).then(r => {
         if (r.status != 200) {
             document.getElementById('logoutContainer').style.display = "none";
             logout();
         } else {
-            document.getElementById('logoutContainer').style.display = "block";
-            document.getElementById('logoutText').innerHTML += "Logout (logged in as " + sanitize(username) + ")";
+            r.json().then(data => {
+                console.log("You are", data);
+                window.user = data;
+                document.getElementById('logoutContainer').style.display = "block";
+                document.getElementById('logoutText').innerHTML += "Logout (logged in as " + sanitize(data.name) + ")";
+            });
         }
     });
 }
