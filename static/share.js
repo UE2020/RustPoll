@@ -29,6 +29,9 @@ function sanitize(string) {
 
 function logout() {
     localStorage.removeItem('token');
+    if (window.onLogOut) {
+        setTimeout(window.onLogOut, 1);
+    }
 }
 
 
@@ -37,7 +40,7 @@ function verify() {
     let token = localStorage.getItem('token');
     if (!token) {
         document.getElementById('logoutContainer').style.display = "none";
-        logout();
+        //logout();
         return;
     }
     fetch(`/api/self`, {

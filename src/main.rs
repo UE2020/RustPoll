@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use actix_files as fs;
 use actix_storage::Storage;
 use actix_storage_sled::SledStore;
@@ -8,6 +10,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use log::*;
 use sha2::Digest;
 use std::{collections::HashMap, time};
+use std::sync::Mutex;
 
 const JWT_SECRET: &[u8] = b"gtszzkbqWkAKQNWXafYYRmYP7L34CqMaLGsf8Vh6BbBjdvm67E57PKUs7qBaxmS4";
 
@@ -75,12 +78,36 @@ struct SignupRequest {
     password: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Clone, Debug)]
+struct JWTClaims {
+    sub: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Clone, Debug)]
+struct TrendingPoll {
+    created_at: u128,
+    id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Clone, Debug)]
+struct TrendingPolls {
+    last_sorted: u128,
+    polls: Vec<TrendingPoll>,
+}
+
+#[derive(serde::Deserialize)]
+struct GetTrendingQueryParams {
+    start: u64,
+    end: u64,
+}
+
 #[post("/api/create_poll")]
-async fn create_poll(req_body: String, storage: Storage, req: HttpRequest) -> impl Responder {
+async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpRequest) -> impl Responder {
     let create_req: PollCreateRequest = match serde_json::from_str(req_body.as_str()) {
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
+    let storage = storage.db.lock().unwrap();
 
     info!("Recieve create_poll request {:?}", create_req);
 
@@ -91,23 +118,23 @@ async fn create_poll(req_body: String, storage: Storage, req: HttpRequest) -> im
     let token = match token {
         Some(token) => match token.to_str() {
             Ok(token_str) => token_str,
-            Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
         },
-        None => return HttpResponse::Unauthorized().body("No auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
-    let user = decode::<String>(
+    let user = decode::<JWTClaims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_ref()),
-        &Validation::new(Algorithm::HS256),
+        &{ let mut v = Validation::new(Algorithm::HS256); v.validate_exp = false; v },
     );
     let username = match user {
-        Ok(user) => user.claims,
-        Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+        Ok(user) => user.claims.sub,
+        Err(e) => return HttpResponse::Unauthorized().body(format!("JWT error: {}", e)),
     };
 
     let user: Option<User> = users.get(username.clone()).await.unwrap();
     match user {
-        Some(user) => {
+        Some(mut user) => {
             let id = loop {
                 let buf = &mut uuid::Uuid::encode_buffer();
                 let uuid = uuid::Uuid::new_v4().to_simple().encode_lower(buf);
@@ -134,6 +161,46 @@ async fn create_poll(req_body: String, storage: Storage, req: HttpRequest) -> im
                 id: id.clone(),
             };
             polls.set(id.clone(), &new_poll).await.unwrap();
+
+            user.polls.push(id.clone());
+            users.set(username.clone(), &user).await.unwrap();
+
+            let now = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis();
+
+            let mut trending: TrendingPolls = storage.get("trending").await.unwrap().unwrap();
+            if now - trending.last_sorted > 3.6e+6 as u128 {
+                trending.polls.retain(|poll| {
+                    let diff = now - poll.created_at;
+                    diff <= 2.592e+8 as u128 // 3 days
+                });
+                trending.polls.sort_unstable_by(|a, b| {
+                    use futures::executor::block_on;
+                    block_on(async {
+                        let a: Poll = polls.get(a.id.clone()).await.unwrap().unwrap();
+                        let b: Poll = polls.get(b.id.clone()).await.unwrap().unwrap();
+    
+                        let time_a = now - a.created_at;
+                        let time_b = now - b.created_at;
+        
+                        let a_votes = a.options.iter().map(|opt| opt.votes).sum::<usize>();
+                        let b_votes = b.options.iter().map(|opt| opt.votes).sum::<usize>();
+    
+                        let a = a_votes / time_a as usize;
+                        let b = b_votes / time_b as usize;
+        
+                        b.partial_cmp(&a).unwrap()
+                    })
+                });
+                trending.last_sorted = now;
+            }
+            
+            trending.polls.push(TrendingPoll {
+                created_at: new_poll.created_at,
+                id: id.clone(),
+            });
+
+            storage.set("trending", &trending).await.unwrap();
+
             return HttpResponse::Ok().body(id);
         }
         None => return HttpResponse::Unauthorized().body("No such user"),
@@ -141,11 +208,12 @@ async fn create_poll(req_body: String, storage: Storage, req: HttpRequest) -> im
 }
 
 #[post("/api/sign_up")]
-async fn sign_up(req_body: String, storage: Storage) -> impl Responder {
+async fn sign_up(req_body: String, storage: web::Data<AppData>) -> impl Responder {
     let create_req: SignupRequest = match serde_json::from_str(req_body.as_str()) {
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
+    let storage = storage.db.lock().unwrap();
 
     info!("Recieve sign_up request {:?}", create_req);
 
@@ -166,21 +234,21 @@ async fn sign_up(req_body: String, storage: Storage) -> impl Responder {
         users.set(create_req.name.clone(), &new_user).await.unwrap();
         let token = encode(
             &Header::default(),
-            &create_req.name,
+            &JWTClaims { sub: create_req.name },
             &EncodingKey::from_secret(JWT_SECRET.as_ref()),
         )
         .unwrap();
-        println!("Token {}", token);
         HttpResponse::Ok().body(token)
     }
 }
 
 #[post("/api/login")]
-async fn login(req_body: String, storage: Storage) -> impl Responder {
+async fn login(req_body: String, storage: web::Data<AppData>) -> impl Responder {
     let check_req: ClientSideUser = match serde_json::from_str(req_body.as_str()) {
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
+    let storage = storage.db.lock().unwrap();
 
     info!("Recieve login request {:?}", check_req);
 
@@ -195,40 +263,40 @@ async fn login(req_body: String, storage: Storage) -> impl Responder {
             if user.password_hash[..] == result[..] {
                 let token = encode(
                     &Header::default(),
-                    &check_req.name,
+                    &JWTClaims { sub: check_req.name },
                     &EncodingKey::from_secret(JWT_SECRET.as_ref()),
                 )
                 .unwrap();
-                println!("Token {}", token);
                 return HttpResponse::Ok().body(token);
             } else {
-                return HttpResponse::Unauthorized().body("Bad auth");
+                return HttpResponse::Unauthorized().body("You are not logged in.");
             }
         }
-        None => return HttpResponse::Unauthorized().body("Bad auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     }
 }
 
 #[get("/api/self")]
-async fn get_self(storage: Storage, req: HttpRequest) -> impl Responder {
+async fn get_self(storage: web::Data<AppData>, req: HttpRequest) -> impl Responder {
+    let storage = storage.db.lock().unwrap();
     let users = storage.scope("users");
 
     let token = req.headers().get("authorization");
     let token = match token {
         Some(token) => match token.to_str() {
             Ok(token_str) => token_str,
-            Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
         },
-        None => return HttpResponse::Unauthorized().body("No auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
-    let user = decode::<String>(
+    let user = decode::<JWTClaims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_ref()),
-        &Validation::new(Algorithm::HS256),
+        &{ let mut v = Validation::new(Algorithm::HS256); v.validate_exp = false; v },
     );
     let username = match user {
-        Ok(user) => user.claims,
-        Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+        Ok(user) => user.claims.sub,
+        Err(e) => return HttpResponse::Unauthorized().body(format!("Failed to log in.")),
     };
 
     let user: Option<User> = users.get(username.clone()).await.unwrap();
@@ -241,12 +309,13 @@ async fn get_self(storage: Storage, req: HttpRequest) -> impl Responder {
                 votes: user.votes.len() as u32,
             }).unwrap())
         }
-        None => return HttpResponse::Unauthorized().body("Bad auth"),
+        None => return HttpResponse::Unauthorized().body("No such user"),
     }
 }
 
 #[get("/api/profile/{name}")]
-async fn profile(storage: Storage, path: web::Path<(String,)>) -> impl Responder {
+async fn profile(storage: web::Data<AppData>, path: web::Path<(String,)>) -> impl Responder {
+    let storage = storage.db.lock().unwrap();
     let name = path.into_inner().0;
     info!("Recieve profile request {}", name);
 
@@ -267,8 +336,10 @@ async fn profile(storage: Storage, path: web::Path<(String,)>) -> impl Responder
 }
 
 #[get("/api/poll/{id}")]
-async fn get_poll(storage: Storage, path: web::Path<(String,)>, req: HttpRequest) -> impl Responder {
+async fn get_poll(storage: web::Data<AppData>, path: web::Path<(String,)>, req: HttpRequest) -> impl Responder {
     let id = path.into_inner().0;
+    let storage = storage.db.lock().unwrap();
+
     info!("Recieve poll request {}", id);
 
     let polls = storage.scope("polls");
@@ -278,7 +349,7 @@ async fn get_poll(storage: Storage, path: web::Path<(String,)>, req: HttpRequest
     let token = match token {
         Some(token) => match token.to_str() {
             Ok(token_str) => token_str,
-            Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
         },
         None => {
             let poll: Option<Poll> = polls.get(id.clone()).await.unwrap();
@@ -297,14 +368,14 @@ async fn get_poll(storage: Storage, path: web::Path<(String,)>, req: HttpRequest
             }
         },
     };
-    let user = decode::<String>(
+    let user = decode::<JWTClaims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_ref()),
-        &Validation::new(Algorithm::HS256),
+        &{ let mut v = Validation::new(Algorithm::HS256); v.validate_exp = false; v },
     );
     let username = match user {
-        Ok(user) => user.claims,
-        Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+        Ok(user) => user.claims.sub,
+        Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
 
     let user: Option<User> = users.get(username.clone()).await.unwrap();
@@ -326,18 +397,102 @@ async fn get_poll(storage: Storage, path: web::Path<(String,)>, req: HttpRequest
                 None => return HttpResponse::NotFound().body("No such poll"),
             }
         },
-        None => return HttpResponse::Unauthorized().body("Bad auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
+    }
+}
+
+#[get("/api/trending")]
+async fn get_trending(storage: web::Data<AppData>, req: HttpRequest, mut info: web::Query<GetTrendingQueryParams>) -> impl Responder {
+    let storage = storage.db.lock().unwrap();
+
+    let polls = storage.scope("polls");
+    let users = storage.scope("users");
+    
+    let trending: TrendingPolls = storage.get("trending").await.unwrap().unwrap();
+
+    let mut compiled_trending: Vec<GetPollResponse> = Vec::new();
+
+    let token = req.headers().get("authorization");
+    let token = match token {
+        Some(token) => match token.to_str() {
+            Ok(token_str) => token_str,
+            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
+        },
+        None => {
+            if info.start > trending.polls.len() as u64 {
+                return HttpResponse::BadRequest().body("Invalid index");
+            }
+            if info.end > trending.polls.len() as u64 {
+                info.end = trending.polls.len() as u64;
+            }
+
+            for i in info.start..info.end {
+                let poll = &trending.polls[i as usize];
+                let db_poll: Poll = polls.get(poll.id.clone()).await.unwrap().unwrap();
+                let poll_resp = GetPollResponse {
+                    title: db_poll.title,
+                    options: db_poll.options,
+                    created_at: db_poll.created_at,
+                    id: db_poll.id,
+                    creator: db_poll.creator,
+                    voted_for: None
+                };
+                compiled_trending.push(poll_resp);
+            }
+
+            return HttpResponse::Ok().body(serde_json::to_string(&compiled_trending).unwrap());
+        },
+    };
+    let user = decode::<JWTClaims>(
+        token,
+        &DecodingKey::from_secret(JWT_SECRET.as_ref()),
+        &{ let mut v = Validation::new(Algorithm::HS256); v.validate_exp = false; v },
+    );
+    let username = match user {
+        Ok(user) => user.claims.sub,
+        Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
+    };
+
+    let user: Option<User> = users.get(username.clone()).await.unwrap();
+
+    match user {
+        Some(user) => {
+            if info.start > trending.polls.len() as u64 {
+                return HttpResponse::BadRequest().body("Invalid index");
+            }
+            if info.end > trending.polls.len() as u64 {
+                info.end = trending.polls.len() as u64;
+            }
+
+            for i in info.start..info.end {
+                let poll = &trending.polls[i as usize];
+                let db_poll: Poll = polls.get(poll.id.clone()).await.unwrap().unwrap();
+                let poll_resp = GetPollResponse {
+                    title: db_poll.title,
+                    options: db_poll.options,
+                    created_at: db_poll.created_at,
+                    id: db_poll.id.clone(),
+                    creator: db_poll.creator,
+                    voted_for: user.votes.get(&db_poll.id).map(|v| *v)
+                };
+                compiled_trending.push(poll_resp);
+            }
+
+            return HttpResponse::Ok().body(serde_json::to_string(&compiled_trending).unwrap());
+        },
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     }
 }
 
 #[patch("/api/vote")]
-async fn vote(req_body: String, storage: Storage, req: HttpRequest) -> impl Responder {
+async fn vote(req_body: String, storage: web::Data<AppData>, req: HttpRequest) -> impl Responder {
     let vote_req: PollVoteRequest = match serde_json::from_str(req_body.as_str()) {
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
+    let storage = storage.db.lock().unwrap();
 
-    info!("Recieve vote request {:?}", vote_req);
+    //info!("Recieve vote request {:?}", vote_req);
 
     let users = storage.scope("users");
     let polls = storage.scope("polls");
@@ -346,42 +501,50 @@ async fn vote(req_body: String, storage: Storage, req: HttpRequest) -> impl Resp
     let token = match token {
         Some(token) => match token.to_str() {
             Ok(token_str) => token_str,
-            Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
         },
-        None => return HttpResponse::Unauthorized().body("No auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
-    let user = decode::<String>(
+    let user = decode::<JWTClaims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_ref()),
-        &Validation::new(Algorithm::HS256),
+        &{ let mut v = Validation::new(Algorithm::HS256); v.validate_exp = false; v },
     );
     let username = match user {
-        Ok(user) => user.claims,
-        Err(_) => return HttpResponse::Unauthorized().body("Bad auth"),
+        Ok(user) => user.claims.sub,
+        Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
 
     let user: Option<User> = users.get(username.clone()).await.unwrap();
     match user {
         Some(mut user) => {
+            if user.votes.contains_key(&vote_req.poll_id) {
+                return HttpResponse::BadRequest().body("You already voted.");
+            }
             let poll: Option<Poll> = polls.get(vote_req.poll_id.clone()).await.unwrap();
             match poll {
                 Some(mut poll) => {
                     match poll.options.get_mut(vote_req.option as usize) {
                         Some(mut opt) => {
+                            info!("Add vote");
                             opt.votes += 1;
                             user.votes.insert(poll.id.clone(), vote_req.option);
                         }
-                        None => return HttpResponse::BadRequest().body("No such option"),
+                        None => return HttpResponse::BadRequest().body("No such option."),
                     }
                     polls.set(poll.id.clone(), &poll).await.unwrap();
                     users.set(user.name.clone(), &user).await.unwrap();
                     HttpResponse::Ok().finish()
                 }
-                None => return HttpResponse::NotFound().body("No such poll"),
+                None => return HttpResponse::NotFound().body("No such poll."),
             }
         }
-        None => return HttpResponse::Unauthorized().body("Bad auth"),
+        None => return HttpResponse::Unauthorized().body("You are not logged in."),
     }
+}
+
+struct AppData {
+    db: Mutex<Storage>
 }
 
 #[actix_web::main]
@@ -394,6 +557,12 @@ async fn main() -> std::io::Result<()> {
         .format(actix_storage::Format::Bincode)
         .finish();
 
+    
+    if !storage.contains_key("trending").await.unwrap() {
+        let temp: TrendingPolls = TrendingPolls { last_sorted: time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis(), polls: Vec::new() };
+        storage.set("trending", &temp).await.unwrap();
+    }
+
     HttpServer::new(move || {
         App::new()
             .service(create_poll)
@@ -403,12 +572,13 @@ async fn main() -> std::io::Result<()> {
             .service(login)
             .service(get_poll)
             .service(get_self)
+            .service(get_trending)
             .service(
                 fs::Files::new("/", "./static")
                     .show_files_listing()
                     .index_file("index.html"),
             )
-            .app_data(storage.clone())
+            .data(AppData { db: Mutex::new(storage.clone()) })
     })
     .bind("localhost:8080")?
     .run()

@@ -16,8 +16,8 @@
     <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
     <script src="share.js"></script>
     <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const pollId = urlParams.get('pollId');
+        let reachedEnd = false;
+        let current = 0;
 
         function abbrNum(number, decPlaces) {
             // 2 decimal places => 100, 3 => 1000, etc
@@ -55,9 +55,21 @@
             return number;
         }
 
-        window.onLogOut = displayPoll;
+        window.onLogOut = () => {
+            window.location.reload();
+        };
 
-        async function displayPoll() {
+        window.onscroll = function (ev) {
+            if ((window.innerHeight + window.scrollY) >= document.body.scrollHeight) {
+                if (reachedEnd) {
+                    return;
+                }
+
+                loadTrending(current+1, current+11);
+            }
+        };
+
+        async function displayPoll(pollid) {
             let token = localStorage.getItem('token');
             let headers = {
                 "Content-type": "application/json",
@@ -66,7 +78,7 @@
             if (token) {
                 headers['authorization'] = token;
             }
-            let poll = await fetch(`/api/poll/${pollId}`, {
+            let poll = await fetch(`/api/poll/${pollid}`, {
                 method: "GET",
                 headers,
             }).then(async r => {
@@ -77,14 +89,15 @@
                     return await r.json();
                 }
             });
-            console.log("Fetch poll from api", poll)
-            let optionsDiv = document.getElementById('options');
+
+            let optionsDiv = document.getElementById(`options-${pollid}`);
             optionsDiv.innerHTML = '';
-            pollData = poll;
-            document.getElementById('polltitle').innerHTML = sanitize(poll.title);
+
+            let titleElement = document.getElementById(`polltitle-${pollid}`);
+            titleElement.innerHTML = `<a href="/poll.html?pollId=${pollid}" target="_blank">${sanitize(poll.title)}</a>`;
 
             let d = new Date(poll.created_at);
-            document.getElementById('time').innerHTML = `Created <strong>${d.toLocaleDateString()}, ${d.toLocaleTimeString()}</strong> by <strong>${sanitize(poll.creator)}</strong>`;
+            document.getElementById(`time-${pollid}`).innerHTML = `Created <strong>${d.toLocaleDateString()}, ${d.toLocaleTimeString()}</strong> by <strong>${sanitize(poll.creator)}</strong>`;
 
             let options = poll.options.length;
 
@@ -93,12 +106,12 @@
                 let option = poll.options[i];
                 total += option.votes;
             }
-            document.getElementById('header').innerHTML = `Total votes: <strong>${abbrNum(total, 1)}</strong>`;
+            document.getElementById(`header-${pollid}`).innerHTML = `Total votes: <strong>${abbrNum(total, 1)}</strong>`;
             for (let i = 0; i < options; i++) {
                 let option = poll.options[i];
                 let optData = '';
                 if (poll.voted_for == null) {
-                    optData = `| <a href="javascript:void" onclick="vote(${i})">vote</a>`;
+                    optData = `| <a href="javascript:void" onclick="vote(${i}, '${pollid}')">vote</a>`;
                 } else {
                     if (poll.voted_for == i) {
                         optData += `| <i class="fa fa-check-square"></i> <strong>You voted for this option</strong>`;
@@ -113,10 +126,89 @@
             }
         }
 
-        let pollData;
-        docReady(displayPoll);
+        async function addPoll(poll) {
+            let pollsDiv = document.getElementById("polls");
+            pollsDiv.innerHTML += `<h2 id="polltitle-${poll.id}">Loading...</h2>
+        <div class="card">
+            <div class="card-header" id="header-${poll.id}"></div>
+            <div class="card-body" id="options-${poll.id}">
+                Loading...
+            </div>
+            <div class="card-footer" id="time-${poll.id}">Loading...</div>
+        </div><hr>`;
+            let optionsDiv = document.getElementById(`options-${poll.id}`);
+            optionsDiv.innerHTML = '';
 
-        function vote(opt) {
+            let titleElement = document.getElementById(`polltitle-${poll.id}`);
+            titleElement.innerHTML = `<a href="/poll.html?pollId=${poll.id}" target="_blank">${sanitize(poll.title)}</a>`;
+
+            let d = new Date(poll.created_at);
+            document.getElementById(`time-${poll.id}`).innerHTML = `Created <strong>${d.toLocaleDateString()}, ${d.toLocaleTimeString()}</strong> by <strong>${sanitize(poll.creator)}</strong>`;
+
+            let options = poll.options.length;
+
+            let total = 0;
+            for (let i = 0; i < options; i++) {
+                let option = poll.options[i];
+                total += option.votes;
+            }
+            document.getElementById(`header-${poll.id}`).innerHTML = `Total votes: <strong>${abbrNum(total, 1)}</strong>`;
+            for (let i = 0; i < options; i++) {
+                let option = poll.options[i];
+                let optData = '';
+                if (poll.voted_for == null) {
+                    optData = `| <a href="javascript:void" onclick="vote(${i}, '${poll.id}')">vote</a>`;
+                } else {
+                    if (poll.voted_for == i) {
+                        optData += `| <i class="fa fa-check-square"></i> <strong>You voted for this option</strong>`;
+                    }
+                }
+                optionsDiv.innerHTML += `<a><strong>${sanitize(option.name)}</strong> (${abbrNum(option.votes, 1)} votes) ${optData}
+                <div class="progress mb-3 mt-1">
+                    <div class="progress-bar" role="progressbar" style="width: ${(option.votes / total) * 100}%" aria-valuenow="100"
+                        aria-valuemin="0" aria-valuemax="100">${isNaN(Math.round(((option.votes / total) * 100))) ? '' : Math.round(((option.votes / total) * 100)) + '%'}</div>
+                </div>
+                `;
+            }
+        }
+
+        async function loadTrending(start, end) {
+            let token = localStorage.getItem('token');
+            let headers = {
+                "Content-type": "application/json",
+                "accept": "application/json",
+            };
+            if (token) {
+                headers['authorization'] = token;
+            }
+            let trending = await fetch(`/api/trending?start=${start}&end=${end}`, {
+                method: "GET",
+                headers,
+            }).then(async r => {
+                if (r.status == 400) {
+                    console.log('That\'s the end!');
+                } else if (r.status != 200) {
+                    document.getElementById('err').style.display = 'block';
+                    throw new Error("Failed to load trending");
+                } else {
+                    return await r.json();
+                }
+            });
+            console.log("Fetch trending", start, "to", end, trending);
+
+            if (trending.length < end - start) {
+                reachedEnd = true;
+            }
+
+            current = end;
+
+            // populate polls
+            trending.forEach(poll => {
+                addPoll(poll);
+            });
+        }
+
+        function vote(opt, pollid) {
             let token = localStorage.getItem('token');
 
             fetch(`/api/vote`, {
@@ -127,7 +219,7 @@
                     "authorization": token,
                 },
                 body: JSON.stringify({
-                    poll_id: pollId,
+                    poll_id: pollid,
                     option: opt,
                 })
             }).then(r => {
@@ -137,10 +229,12 @@
                         document.getElementById('servererr').innerHTML = `<strong>Oh no!</strong> ` + data;
                     });
                 } else {
-                    displayPoll();
+                    displayPoll(pollid);
                 }
             })
         }
+
+        docReady(loadTrending.bind(null, 0, 10));
     </script>
 </head>
 
@@ -176,20 +270,12 @@
         </div>
     </nav>
 
-    <div class="container mt-3">
+    <div class="container mt-3" id="polls">
         <div class="alert alert-danger" id="err" style="display:none;">
-            <strong>Oh no!</strong> That poll doesn't exist.
+            <strong>Oh no!</strong> Failed to load trending. Please try again later.
         </div>
         <div class="alert alert-danger" id="servererr" style="display:none;">
 
-        </div>
-        <h2 id="polltitle">Loading...</h2>
-        <div class="card">
-            <div class="card-header" id="header"></div>
-            <div class="card-body" id="options">
-                Loading...
-            </div>
-            <div class="card-footer" id="time">Loading...</div>
         </div>
     </div>
 

@@ -20,7 +20,6 @@
         async function signup() {
             let uname = document.getElementById('uname').value;
             let pwd = document.getElementById('pwd').value;
-            let hash = await sha256(pwd);
             fetch(`/api/sign_up`, {
                 method: "POST",
                 headers: {
@@ -29,18 +28,19 @@
                 },
                 body: JSON.stringify({
                     name: uname,
-                    password_hash: hash
+                    password: pwd
                 })
             }).then(r => {
                 if (r.status != 200) {
                     document.getElementById('takenerr').style.display = "block";
                 } else {
-                    document.getElementById('success').style.display = "block";
-                    localStorage.setItem('name', uname);
-                    localStorage.setItem('password_hash', hash);
-                    setTimeout(() => {
-                        window.location.href = "/";
-                    }, 4000);
+                    r.text().then(data => {
+                        document.getElementById('success').style.display = "block";
+                        localStorage.setItem('token', data);
+                        setTimeout(() => {
+                            window.location.href = "/";
+                        }, 4000);
+                    });
                 }
             });
         }
@@ -66,13 +66,14 @@
                     <a class="nav-link" href="login.html"><i class="fas fa-user-alt"></i> Login</a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="#"><i class="fas fa-chart-bar"></i> Create poll</a>
+                    <a class="nav-link" href="create.html"><i class="fas fa-chart-bar"></i> Create poll</a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="#"><i class="fas fa-cloud"></i> Trending</a>
+                    <a class="nav-link" href="trending.html"><i class="fas fa-cloud"></i> Trending</a>
                 </li>
                 <li class="nav-item" id="logoutContainer">
-                    <a class="nav-link" href="#" onclick="logout(); verify();" id="logoutText"><i class="fas fa-angle-left"></i> </a>
+                    <a class="nav-link" href="#" onclick="logout(); verify();" id="logoutText"><i
+                            class="fas fa-angle-left"></i> </a>
                 </li>
             </ul>
         </div>
