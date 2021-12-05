@@ -32,7 +32,10 @@
                 })
             }).then(r => {
                 if (r.status != 200) {
-                    document.getElementById('takenerr').style.display = "block";
+                    r.text().then(data => {
+                        document.getElementById('err').style.display = "block";
+                        document.getElementById('err').innerHTML = `<strong>Aw snap!</strong> ${data}`;
+                    });
                 } else {
                     r.text().then(data => {
                         document.getElementById('success').style.display = "block";
@@ -99,7 +102,7 @@
             <div class="invalid-feedback">Please fill out this field.</div>
         </div>
         <button class="btn btn-primary" onclick="signup()">Submit</button>
-        <div class="alert alert-danger mt-3" id="takenerr" style="display:none;">
+        <div class="alert alert-danger mt-3" id="err" style="display:none;">
             <strong>Aw Snap!</strong> That username is taken.
         </div>
         <div class="alert alert-success mt-3" id="success" style="display:none;">

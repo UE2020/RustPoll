@@ -12,7 +12,7 @@ use sha2::Digest;
 use std::{collections::HashMap, time};
 use std::sync::Mutex;
 
-const JWT_SECRET: &[u8] = b"gtszzkbqWkAKQNWXafYYRmYP7L34CqMaLGsf8Vh6BbBjdvm67E57PKUs7qBaxmS4";
+const JWT_SECRET: &[u8] = b"SOMESECRET"; // might want to change this lmao
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Clone, Debug)]
 struct Poll {
@@ -107,20 +107,32 @@ async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpReq
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
     info!("Recieve create_poll request {:?}", create_req);
 
-    let users = storage.scope("users");
-    let polls = storage.scope("polls");
+    if create_req.title.len() > 100 {
+        return HttpResponse::BadRequest().body("Title is too long.");
+    } else if create_req.title.is_empty() {
+        return HttpResponse::BadRequest().body("Title is empty.");
+    }
+
+    if create_req.options.len() > 10 {
+        return HttpResponse::BadRequest().body("Too many options.");
+    } else if create_req.options.len() == 0 {
+        return HttpResponse::BadRequest().body("No options.");
+    }
+
+    let users = storage.open_tree("users").unwrap();
+    let polls = storage.open_tree("polls").unwrap();
 
     let token = req.headers().get("authorization");
     let token = match token {
         Some(token) => match token.to_str() {
             Ok(token_str) => token_str,
-            Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
+            Err(_) => return HttpResponse::Unauthorized().body("You aren't <a href=\"login.html\" target=\"_blank\">logged in.</a>"),
         },
-        None => return HttpResponse::Unauthorized().body("You are not logged in."),
+        None => return HttpResponse::Unauthorized().body("You aren't <a href=\"login.html\" target=\"_blank\">logged in.</a>"),
     };
     let user = decode::<JWTClaims>(
         token,
@@ -129,16 +141,16 @@ async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpReq
     );
     let username = match user {
         Ok(user) => user.claims.sub,
-        Err(e) => return HttpResponse::Unauthorized().body(format!("JWT error: {}", e)),
+        Err(e) => return HttpResponse::Unauthorized().body("You aren't <a href=\"login.html\" target=\"_blank\">logged in.</a>"),
     };
 
-    let user: Option<User> = users.get(username.clone()).await.unwrap();
+    let user: Option<User> = users.get(&username).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
     match user {
         Some(mut user) => {
             let id = loop {
                 let buf = &mut uuid::Uuid::encode_buffer();
                 let uuid = uuid::Uuid::new_v4().to_simple().encode_lower(buf);
-                if !storage.contains_key(uuid.to_owned()).await.unwrap() {
+                if !polls.contains_key(uuid.to_owned()).unwrap() {
                     break uuid.to_owned();
                 }
             };
@@ -160,14 +172,14 @@ async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpReq
                 title: create_req.title,
                 id: id.clone(),
             };
-            polls.set(id.clone(), &new_poll).await.unwrap();
+            polls.insert(&id, bincode::serialize(&new_poll).unwrap()).unwrap();
 
             user.polls.push(id.clone());
-            users.set(username.clone(), &user).await.unwrap();
+            users.insert(&username, bincode::serialize(&user).unwrap()).unwrap();
 
             let now = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis();
 
-            let mut trending: TrendingPolls = storage.get("trending").await.unwrap().unwrap();
+            let mut trending: TrendingPolls = storage.get("trending").unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap()).unwrap();
             if now - trending.last_sorted > 3.6e+6 as u128 {
                 trending.polls.retain(|poll| {
                     let diff = now - poll.created_at;
@@ -176,8 +188,8 @@ async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpReq
                 trending.polls.sort_unstable_by(|a, b| {
                     use futures::executor::block_on;
                     block_on(async {
-                        let a: Poll = polls.get(a.id.clone()).await.unwrap().unwrap();
-                        let b: Poll = polls.get(b.id.clone()).await.unwrap().unwrap();
+                        let a: Poll = polls.get(a.id.clone()).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap()).unwrap();
+                        let b: Poll = polls.get(b.id.clone()).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap()).unwrap();
     
                         let time_a = now - a.created_at;
                         let time_b = now - b.created_at;
@@ -199,7 +211,7 @@ async fn create_poll(req_body: String, storage: web::Data<AppData>, req: HttpReq
                 id: id.clone(),
             });
 
-            storage.set("trending", &trending).await.unwrap();
+            storage.insert("trending", bincode::serialize(&trending).unwrap()).unwrap();
 
             return HttpResponse::Ok().body(id);
         }
@@ -213,14 +225,26 @@ async fn sign_up(req_body: String, storage: web::Data<AppData>) -> impl Responde
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
     info!("Recieve sign_up request {:?}", create_req);
 
-    let users = storage.scope("users");
+    let users = storage.open_tree("users").unwrap();
 
-    if users.contains_key(create_req.name.clone()).await.unwrap() {
-        return HttpResponse::BadRequest().body("User already exists");
+    if create_req.name.len() > 30 {
+        return HttpResponse::BadRequest().body("Name is too long.");
+    } else if create_req.name.is_empty() {
+        return HttpResponse::BadRequest().body("Name is empty.");
+    }
+
+    if create_req.password.len() > 30 {
+        return HttpResponse::BadRequest().body("Password is too long.");
+    } else if create_req.password.is_empty() {
+        return HttpResponse::BadRequest().body("Password is empty.");
+    }
+
+    if users.contains_key(&create_req.name).unwrap() {
+        return HttpResponse::BadRequest().body("That username is taken.");
     } else {
         let mut hasher = sha2::Sha256::new();
         hasher.update(create_req.password.as_bytes());
@@ -231,7 +255,7 @@ async fn sign_up(req_body: String, storage: web::Data<AppData>) -> impl Responde
             votes: HashMap::new(),
             polls: Vec::new(),
         };
-        users.set(create_req.name.clone(), &new_user).await.unwrap();
+        users.insert(&create_req.name, bincode::serialize(&new_user).unwrap()).unwrap();
         let token = encode(
             &Header::default(),
             &JWTClaims { sub: create_req.name },
@@ -248,13 +272,13 @@ async fn login(req_body: String, storage: web::Data<AppData>) -> impl Responder 
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
     info!("Recieve login request {:?}", check_req);
 
-    let users = storage.scope("users");
+    let users = storage.open_tree("users").unwrap();
 
-    let user: Option<User> = users.get(check_req.name.clone()).await.unwrap();
+    let user: Option<User> = users.get(&check_req.name).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
     match user {
         Some(user) => {
             let mut hasher = sha2::Sha256::new();
@@ -278,8 +302,8 @@ async fn login(req_body: String, storage: web::Data<AppData>) -> impl Responder 
 
 #[get("/api/self")]
 async fn get_self(storage: web::Data<AppData>, req: HttpRequest) -> impl Responder {
-    let storage = storage.db.lock().unwrap();
-    let users = storage.scope("users");
+    let storage = &storage.db;
+    let users = storage.open_tree("users").unwrap();
 
     let token = req.headers().get("authorization");
     let token = match token {
@@ -299,7 +323,7 @@ async fn get_self(storage: web::Data<AppData>, req: HttpRequest) -> impl Respond
         Err(e) => return HttpResponse::Unauthorized().body(format!("Failed to log in.")),
     };
 
-    let user: Option<User> = users.get(username.clone()).await.unwrap();
+    let user: Option<User> = users.get(&username).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
 
     match user {
         Some(user) => {
@@ -315,13 +339,13 @@ async fn get_self(storage: web::Data<AppData>, req: HttpRequest) -> impl Respond
 
 #[get("/api/profile/{name}")]
 async fn profile(storage: web::Data<AppData>, path: web::Path<(String,)>) -> impl Responder {
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
     let name = path.into_inner().0;
     info!("Recieve profile request {}", name);
 
-    let users = storage.scope("users");
+    let users = storage.open_tree("users").unwrap();
 
-    let user: Option<User> = users.get(name.clone()).await.unwrap();
+    let user: Option<User> = users.get(&name).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
     match user {
         Some(user) => {
             let resp = GetUserResponse {
@@ -338,12 +362,12 @@ async fn profile(storage: web::Data<AppData>, path: web::Path<(String,)>) -> imp
 #[get("/api/poll/{id}")]
 async fn get_poll(storage: web::Data<AppData>, path: web::Path<(String,)>, req: HttpRequest) -> impl Responder {
     let id = path.into_inner().0;
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
     info!("Recieve poll request {}", id);
 
-    let polls = storage.scope("polls");
-    let users = storage.scope("users");
+    let polls = storage.open_tree("polls").unwrap();
+    let users = storage.open_tree("users").unwrap();
 
     let token = req.headers().get("authorization");
     let token = match token {
@@ -352,7 +376,7 @@ async fn get_poll(storage: web::Data<AppData>, path: web::Path<(String,)>, req: 
             Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
         },
         None => {
-            let poll: Option<Poll> = polls.get(id.clone()).await.unwrap();
+            let poll: Option<Poll> = polls.get(&id).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
             match poll {
                 Some(poll) => {
                     return HttpResponse::Ok().body(serde_json::to_string(&GetPollResponse {
@@ -378,11 +402,11 @@ async fn get_poll(storage: web::Data<AppData>, path: web::Path<(String,)>, req: 
         Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
 
-    let user: Option<User> = users.get(username.clone()).await.unwrap();
+    let user: Option<User> = users.get(&username).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
 
     match user {
         Some(user) => {
-            let poll: Option<Poll> = polls.get(id.clone()).await.unwrap();
+            let poll: Option<Poll> = polls.get(&id).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
             match poll {
                 Some(poll) => {
                     return HttpResponse::Ok().body(serde_json::to_string(&GetPollResponse {
@@ -403,12 +427,12 @@ async fn get_poll(storage: web::Data<AppData>, path: web::Path<(String,)>, req: 
 
 #[get("/api/trending")]
 async fn get_trending(storage: web::Data<AppData>, req: HttpRequest, mut info: web::Query<GetTrendingQueryParams>) -> impl Responder {
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
-    let polls = storage.scope("polls");
-    let users = storage.scope("users");
+    let polls = storage.open_tree("polls").unwrap();
+    let users = storage.open_tree("users").unwrap();
     
-    let trending: TrendingPolls = storage.get("trending").await.unwrap().unwrap();
+    let trending: TrendingPolls = bincode::deserialize(&storage.get("trending").unwrap().unwrap()).unwrap();
 
     let mut compiled_trending: Vec<GetPollResponse> = Vec::new();
 
@@ -428,7 +452,7 @@ async fn get_trending(storage: web::Data<AppData>, req: HttpRequest, mut info: w
 
             for i in info.start..info.end {
                 let poll = &trending.polls[i as usize];
-                let db_poll: Poll = polls.get(poll.id.clone()).await.unwrap().unwrap();
+                let db_poll: Poll = bincode::deserialize(&polls.get(&poll.id).unwrap().unwrap()).unwrap();
                 let poll_resp = GetPollResponse {
                     title: db_poll.title,
                     options: db_poll.options,
@@ -453,7 +477,7 @@ async fn get_trending(storage: web::Data<AppData>, req: HttpRequest, mut info: w
         Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
 
-    let user: Option<User> = users.get(username.clone()).await.unwrap();
+    let user: Option<User> = users.get(&username).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
 
     match user {
         Some(user) => {
@@ -466,7 +490,7 @@ async fn get_trending(storage: web::Data<AppData>, req: HttpRequest, mut info: w
 
             for i in info.start..info.end {
                 let poll = &trending.polls[i as usize];
-                let db_poll: Poll = polls.get(poll.id.clone()).await.unwrap().unwrap();
+                let db_poll: Poll = bincode::deserialize(&polls.get(&poll.id).unwrap().unwrap()).unwrap();
                 let poll_resp = GetPollResponse {
                     title: db_poll.title,
                     options: db_poll.options,
@@ -490,12 +514,12 @@ async fn vote(req_body: String, storage: web::Data<AppData>, req: HttpRequest) -
         Ok(req) => req,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
     };
-    let storage = storage.db.lock().unwrap();
+    let storage = &storage.db;
 
     //info!("Recieve vote request {:?}", vote_req);
 
-    let users = storage.scope("users");
-    let polls = storage.scope("polls");
+    let users = storage.open_tree("users").unwrap();
+    let polls = storage.open_tree("polls").unwrap();
 
     let token = req.headers().get("authorization");
     let token = match token {
@@ -515,52 +539,56 @@ async fn vote(req_body: String, storage: web::Data<AppData>, req: HttpRequest) -
         Err(_) => return HttpResponse::Unauthorized().body("You are not logged in."),
     };
 
-    let user: Option<User> = users.get(username.clone()).await.unwrap();
+    let user: Option<User> = users.get(&username).unwrap().map(|u| bincode::deserialize(u.as_ref()).unwrap());
     match user {
         Some(mut user) => {
             if user.votes.contains_key(&vote_req.poll_id) {
                 return HttpResponse::BadRequest().body("You already voted.");
             }
-            let poll: Option<Poll> = polls.get(vote_req.poll_id.clone()).await.unwrap();
-            match poll {
-                Some(mut poll) => {
-                    match poll.options.get_mut(vote_req.option as usize) {
-                        Some(mut opt) => {
-                            info!("Add vote");
-                            opt.votes += 1;
-                            user.votes.insert(poll.id.clone(), vote_req.option);
-                        }
-                        None => return HttpResponse::BadRequest().body("No such option."),
-                    }
-                    polls.set(poll.id.clone(), &poll).await.unwrap();
-                    users.set(user.name.clone(), &user).await.unwrap();
-                    HttpResponse::Ok().finish()
+            
+            let res: sled::transaction::TransactionResult<(), HttpResponse> = polls.transaction(|txn| {
+                let poll: Option<Poll> = txn.get(&vote_req.poll_id)?.map(|p| bincode::deserialize(p.as_ref()).unwrap());
+                if poll.is_none() {
+                    sled::transaction::abort(HttpResponse::NotFound().body("Poll not found"))?;
                 }
-                None => return HttpResponse::NotFound().body("No such poll."),
+                let mut poll = poll.unwrap();
+                match poll.options.get_mut(vote_req.option as usize) {
+                    Some(mut opt) => {
+                        info!("Add vote");
+                        opt.votes += 1;
+                    }
+                    None => sled::transaction::abort(HttpResponse::BadRequest().body("No such option."))?
+                }
+                txn.insert(poll.id.as_bytes(), bincode::serialize(&poll).unwrap()).unwrap();
+                Ok(())
+            });
+            match res {
+                Ok(_) => {},
+                Err(e) => return HttpResponse::BadRequest().finish(),
             }
+
+            user.votes.insert(vote_req.poll_id, vote_req.option);
+            users.insert(&user.name, bincode::serialize(&user).unwrap()).unwrap();
+
+            HttpResponse::Ok().finish()
         }
         None => return HttpResponse::Unauthorized().body("You are not logged in."),
     }
 }
 
 struct AppData {
-    db: Mutex<Storage>
+    db: sled::Db
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
 
-    let db = SledStore::new().expect("Error opening the database");
-    let storage = Storage::build()
-        .store(db)
-        .format(actix_storage::Format::Bincode)
-        .finish();
-
+    let db: sled::Db = sled::open("db").unwrap();
     
-    if !storage.contains_key("trending").await.unwrap() {
+    if !db.contains_key("trending").unwrap() {
         let temp: TrendingPolls = TrendingPolls { last_sorted: time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis(), polls: Vec::new() };
-        storage.set("trending", &temp).await.unwrap();
+        db.insert("trending", bincode::serialize(&temp).unwrap()).unwrap();
     }
 
     HttpServer::new(move || {
@@ -578,9 +606,9 @@ async fn main() -> std::io::Result<()> {
                     .show_files_listing()
                     .index_file("index.html"),
             )
-            .data(AppData { db: Mutex::new(storage.clone()) })
+            .data(AppData { db: db.clone() })
     })
-    .bind("localhost:8080")?
+    .bind("0.0.0.0:80")?
     .run()
     .await
 }

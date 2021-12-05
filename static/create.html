@@ -23,9 +23,8 @@
 
     <script>
         docReady(() => {
-            let username = localStorage.getItem('name');
-            let password = localStorage.getItem('password_hash');
-            if (!username || !password) {
+            let token = localStorage.getItem('token');
+            if (!token) {
                 window.location.href = 'login.html';
             }
         });
@@ -48,7 +47,11 @@
                 })
             }).then(r => {
                 if (r.status != 200) {
-                    document.getElementById('err').style.display = "block";
+                    r.text().then(data => {
+                        document.getElementById('err').style.display = "block";
+                        document.getElementById('err').innerHTML = `<strong>Aw snap!</strong> ${data}`;
+                    });
+                    //document.getElementById('err').style.display = "block";
                 } else {
                     r.text().then(data => window.location.href = 'poll.html?pollId=' + data);
                 }
